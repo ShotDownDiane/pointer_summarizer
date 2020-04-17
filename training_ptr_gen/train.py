@@ -1,11 +1,14 @@
 import os
 import sys
 import time
+import math
+import random
 import argparse
 
 import tensorflow as tf
 import torch
 from model import Model
+from data_util.data import UNKNOWN_TOKEN
 from torch.nn.utils import clip_grad_norm_
 from torch.optim import Adagrad
 
@@ -27,6 +30,15 @@ if config.gpus is not None:
         device = torch.device("cpu")
 else:
     device = torch.device("cpu")
+
+
+def cal_NLLLoss(target, prediction):
+    # use elements in target as the indexes of dimension 1 of prediction to gather the elements in prediction
+    # target:[batch_size,1], prediction:[batch_size, vocab_size+batch_oov_size],
+    # gold_probs has the same size as index=target, and gold_probs[i][j]=[i][target[i][j]]
+    gold_probs = torch.gather(prediction, dim=1, index=target)
+    gold_probs = gold_probs.squeeze()
+    return -torch.log(gold_probs + config.eps_for_log)
 
 
 class Train(object):
@@ -82,7 +94,7 @@ class Train(object):
 
         return start_iter, start_loss
 
-    def train_one_batch(self, batch):
+    def train_one_batch(self, batch, forcing_ratio=1):
         enc_batch, enc_padding_mask, enc_lens, enc_batch_extend_vocab, extra_zeros, c_t_1, coverage = \
             get_input_from_batch(batch, device)
         dec_batch, dec_padding_mask, max_dec_len, dec_lens_var, target_batch = \
@@ -94,22 +106,26 @@ class Train(object):
         s_t_1 = self.model.reduce_state(encoder_hidden)
 
         step_losses = []
+        y_t_1_hat = None
         for di in range(min(max_dec_len, config.max_dec_steps)):
-            y_t_1 = dec_batch[:, di]  # Teacher forcing
-            final_dist, s_t_1, c_t_1, attn_dist, p_gen, next_coverage = self.model.decoder(y_t_1, s_t_1,
+            y_t_1 = dec_batch[:, di]
+            # decide the next input
+            if di == 0 or random.random() < forcing_ratio:
+                x_t = y_t_1  # teacher forcing, use label from last time step as input
+            else:
+                # use embedding of UNK for all oov word
+                y_t_1_hat[y_t_1_hat > self.vocab.size()] = self.vocab.word2id(UNKNOWN_TOKEN)
+                x_t = y_t_1_hat.flatten()  # use prediction from last time step as input
+            final_dist, s_t_1, c_t_1, attn_dist, p_gen, next_coverage = self.model.decoder(x_t, s_t_1,
                                                                                            encoder_outputs,
                                                                                            encoder_feature,
                                                                                            enc_padding_mask, c_t_1,
                                                                                            extra_zeros,
                                                                                            enc_batch_extend_vocab,
                                                                                            coverage, di)
-            # use elements in target as the indexes of dimension 1 of final_dist to gather the elements in final_dist
-            # target:[batch_size,1], final_dist:[batch_size, vocab_size+batch_oov_size],
-            # gold_probs has the same size as index=target, and gold_probs[i][j]=[i][target[i][j]]
+            _, y_t_1_hat = final_dist.data.topk(1)
             target = target_batch[:, di].unsqueeze(1)
-            gold_probs = torch.gather(final_dist, dim=1, index=target)
-            gold_probs = gold_probs.squeeze()
-            step_loss = -torch.log(gold_probs + config.eps_for_log)
+            step_loss = cal_NLLLoss(target, final_dist)
             if config.is_coverage:  # if not using coverge, keep coverage=None
                 step_coverage_loss = torch.sum(torch.min(attn_dist, coverage), 1)
                 step_loss = step_loss + config.cov_loss_wt * step_coverage_loss
@@ -140,8 +156,27 @@ class Train(object):
         best_model_path = None
         min_eval_loss = float('inf')
         while iter < n_iters:
+            s = config.forcing_ratio
+            k = config.decay_to_0_iter
+            x = iter
+            nere_zero = 0.0001
+            if config.forcing_decay_type:
+                if x >= config.decay_to_0_iter:
+                    forcing_ratio = 0
+                elif config.forcing_decay_type == 'linear':
+                    forcing_ratio = s * (k - x) / k
+                elif config.forcing_decay_type == 'exp':
+                    p = pow(nere_zero, 1 / k)
+                    forcing_ratio = s * (p ** x)
+                elif config.forcing_decay_type == 'sigmoid':
+                    r = math.log((1 / nere_zero) - 1) / k
+                    forcing_ratio = s / (1 + pow(math.e, r * (x - k / 2)))
+                else:
+                    raise ValueError('Unrecognized forcing_decay_type: ' + config.forcing_decay_type)
+            else:
+                forcing_ratio = config.forcing_ratio
             batch = self.batcher.next_batch()
-            loss = self.train_one_batch(batch)
+            loss = self.train_one_batch(batch, forcing_ratio=forcing_ratio)
             model_path = os.path.join(self.checkpoint_dir, 'model_step_%d' % (iter + 1))
             avg_loss = calc_avg_loss(loss, avg_loss)
 

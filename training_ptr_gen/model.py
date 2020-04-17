@@ -163,7 +163,7 @@ class Decoder(nn.Module):
         self.out2 = nn.Linear(config.hidden_dim, config.vocab_size)
         init_linear_wt(self.out2)
 
-    def forward(self, y_t_1, s_t_1, encoder_outputs, encoder_feature, enc_padding_mask,
+    def forward(self, x_t, s_t_1, encoder_outputs, encoder_feature, enc_padding_mask,
                 c_t_1, extra_zeros, enc_batch_extend_vocab, coverage, step):
 
         if not self.training and step == 0:
@@ -174,8 +174,8 @@ class Decoder(nn.Module):
                                                            enc_padding_mask, coverage)
             coverage = coverage_next
 
-        y_t_1_embd = self.embedding(y_t_1)
-        x = self.x_context(torch.cat((c_t_1, y_t_1_embd), 1))
+        x_t_embed = self.embedding(x_t)
+        x = self.x_context(torch.cat((c_t_1, x_t_embed), 1))
         lstm_out, s_t = self.lstm(x.unsqueeze(1), s_t_1)
 
         h_decoder, c_decoder = s_t
