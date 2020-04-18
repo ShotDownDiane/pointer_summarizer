@@ -168,7 +168,7 @@ class Train(object):
                 elif config.forcing_decay_type == 'exp':
                     p = pow(nere_zero, 1 / k)
                     forcing_ratio = s * (p ** x)
-                elif config.forcing_decay_type == 'sigmoid':
+                elif config.forcing_decay_type == 'sig':
                     r = math.log((1 / nere_zero) - 1) / k
                     forcing_ratio = s / (1 + pow(math.e, r * (x - k / 2)))
                 else:

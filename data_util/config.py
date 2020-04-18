@@ -43,5 +43,5 @@ gpus = "2,3"
 lr_coverage = 0.15
 
 forcing_ratio = 0.75  # initial percentage of using teacher forcing
-forcing_decay_type = 'sigmoid'  # linear, exp, sigmoid, or None
+forcing_decay_type = 'sigmoid'  # linear, exp (exponential), sig(inverse-sigmoid), or None
 decay_to_0_iter = int(max_iterations / 3 * 2)  # change this according to convergence speed

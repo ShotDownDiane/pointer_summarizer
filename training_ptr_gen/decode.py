@@ -124,10 +124,11 @@ class BeamSearch(object):
                       context=c_t_0[0],
                       coverage=(coverage_t_0[0] if config.is_coverage else None))
                  for _ in range(config.beam_size)]
-        results = []
+        results = []  # this will contain finished hypotheses (those that have emitted the [STOP] token)
         steps = 0
         while steps < config.max_dec_steps and len(results) < config.beam_size:
-            latest_tokens = [h.latest_token for h in beams]
+            latest_tokens = [h.latest_token for h in beams]  # latest token produced by each hypothesis
+            # change any in-article temporary OOV ids to [UNK] id, so that we can lookup word embeddings
             latest_tokens = [t if t < self.vocab.size() else self.vocab.word2id(data.UNKNOWN_TOKEN) \
                              for t in latest_tokens]
             y_t_1 = torch.tensor(latest_tokens, dtype=torch.long).to(device)
@@ -152,7 +153,7 @@ class BeamSearch(object):
                 for h in beams:
                     all_coverage.append(h.coverage)
                 coverage_t_1 = torch.stack(all_coverage, 0)
-
+            # Run one step of the decoder to get the new info
             final_dist, s_t, c_t, attn_dist, p_gen, coverage_t = self.model.decoder(y_t_1, s_t_1,
                                                                                     encoder_outputs, encoder_feature,
                                                                                     enc_padding_mask, c_t_1,
@@ -164,16 +165,20 @@ class BeamSearch(object):
             dec_h, dec_c = s_t
             dec_h = dec_h.squeeze()
             dec_c = dec_c.squeeze()
-
+            # Extend each hypothesis and collect them all in all_beams
             all_beams = []
+            # On the first step, we only had one original hypothesis (the initial hypothesis).
+            # On subsequent steps, all original hypotheses are distinct.
             num_orig_beams = 1 if steps == 0 else len(beams)
             for i in range(num_orig_beams):
+                # take the ith hypothesis and new decoder state info
                 h = beams[i]
                 state_i = (dec_h[i], dec_c[i])
                 context_i = c_t[i]
                 coverage_i = (coverage_t[i] if config.is_coverage else None)
 
-                for j in range(config.beam_size * 2):  # for each of the top 2*beam_size hyps:
+                # for each of the top 2*beam_size hypothesis, extend the ith hypothesis with the jth option
+                for j in range(config.beam_size * 2):
                     new_beam = h.extend(token=topk_ids[i, j].item(),
                                         log_prob=topk_log_probs[i, j].item(),
                                         state=state_i,
@@ -181,23 +186,30 @@ class BeamSearch(object):
                                         coverage=coverage_i)
                     all_beams.append(new_beam)
 
-            beams = []
-            for h in self.sort_beams(all_beams):
-                if h.latest_token == self.vocab.word2id(data.STOP_DECODING):
+            # Filter and collect any hypotheses that have produced the end token.
+            beams = []  # will contain hypotheses for the next step
+            for h in self.sort_beams(all_beams):  # in order of most likely h
+                if h.latest_token == self.vocab.word2id(data.STOP_DECODING):  # if stop token is reached...
+                    # If this hypothesis is sufficiently long, put in results. Otherwise discard.
                     if steps >= config.min_dec_steps:
                         results.append(h)
-                else:
+                else:  # hasn't reached stop token, so continue to extend this hypothesis
                     beams.append(h)
+                # Once we've collected beam_size-many hypotheses for the next step,
+                # or beam_size-many complete hypotheses, stop.
                 if len(beams) == config.beam_size or len(results) == config.beam_size:
                     break
 
             steps += 1
-
+        # At this point, either we've got beam_size results, or we've reached maximum decoder steps
+        # if we don't have any complete results, add all current hypotheses (incomplete summaries) to results
         if len(results) == 0:
             results = beams
 
+        # Sort hypotheses by average log probability
         beams_sorted = self.sort_beams(results)
 
+        # Return the hypothesis with highest average log prob
         return beams_sorted[0]
 
 
